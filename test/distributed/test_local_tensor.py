@@ -302,9 +302,72 @@ class TestLocalTensorRankWorld2(LocalTensorRankTest):
         expected = identical_local_tensors[self.rank] * 2.0
         self.assertEqual(result_mul._local_tensors[self.rank], expected)
 
-    # TODO: consider an op-info test; we don't actually need to cover all ops
-    # but it will help make sure views and more exotic things are done
-    # correctly (in standard subclass style)
+    def test_fill_inplace(self):
+        """Test fill_ in-place operation with DTensor under LocalTensorMode."""
+        with LocalTensorMode(self.world_size):
+            mesh = self.build_device_mesh()
+            tensor = torch.randn(4, 8)
+            dt = distribute_tensor(tensor, mesh, [Shard(0)])
+
+            torch.fill_(dt, 42.0)
+
+            expected = torch.full((4, 8), 42.0)
+            self.assertEqual(expected, dt.full_tensor())
+
+    def test_flip(self):
+        """Test flip operation with DTensor under LocalTensorMode."""
+        with LocalTensorMode(self.world_size):
+            mesh = self.build_device_mesh()
+            tensor = torch.arange(8).reshape(2, 4).float()
+            dt = distribute_tensor(tensor, mesh, [Shard(0)])
+
+            result = torch.flip(dt, dims=[1])
+            expected = torch.flip(tensor, dims=[1])
+            self.assertEqual(expected, result.full_tensor())
+
+    def test_fliplr(self):
+        """Test fliplr operation with DTensor under LocalTensorMode."""
+        with LocalTensorMode(self.world_size):
+            mesh = self.build_device_mesh()
+            tensor = torch.arange(8).reshape(2, 4).float()
+            dt = distribute_tensor(tensor, mesh, [Shard(0)])
+
+            result = torch.fliplr(dt)
+            expected = torch.fliplr(tensor)
+            self.assertEqual(expected, result.full_tensor())
+
+    def test_flipud(self):
+        """Test flipud operation with DTensor under LocalTensorMode."""
+        with LocalTensorMode(self.world_size):
+            mesh = self.build_device_mesh()
+            tensor = torch.arange(8).reshape(2, 4).float()
+            dt = distribute_tensor(tensor, mesh, [Shard(0)])
+
+            result = torch.flipud(dt)
+            expected = torch.flipud(tensor)
+            self.assertEqual(expected, result.full_tensor())
+
+    def test_flatten(self):
+        """Test flatten operation with DTensor under LocalTensorMode."""
+        with LocalTensorMode(self.world_size):
+            mesh = self.build_device_mesh()
+            tensor = torch.arange(8).reshape(2, 4).float()
+            dt = distribute_tensor(tensor, mesh, [Shard(0)])
+
+            result = torch.flatten(dt)
+            expected = torch.flatten(tensor)
+            self.assertEqual(expected, result.full_tensor())
+
+    def test_ravel(self):
+        """Test ravel operation with DTensor under LocalTensorMode."""
+        with LocalTensorMode(self.world_size):
+            mesh = self.build_device_mesh()
+            tensor = torch.arange(8).reshape(2, 4).float()
+            dt = distribute_tensor(tensor, mesh, [Shard(0)])
+
+            result = torch.ravel(dt)
+            expected = torch.ravel(tensor)
+            self.assertEqual(expected, result.full_tensor())
 
     def test_mixed_operations_with_regular_tensors(self):
         """Test operations between LocalTensors and regular tensors."""
