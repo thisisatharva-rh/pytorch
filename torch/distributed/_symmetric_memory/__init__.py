@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import os
 import socket
@@ -93,6 +94,68 @@ def is_symm_mem_enabled_for_group(group_name: c10d.GroupName) -> bool:
 
 _group_name_to_workspace_tensor: dict[str, torch.Tensor | None] = {}
 
+_symm_mem_logger = logging.getLogger(__name__)
+_symm_mem_timeout: float | None = None
+
+
+def _get_symm_mem_timeout() -> float:
+    """Return the symmetric memory timeout in seconds (0 = disabled)."""
+    global _symm_mem_timeout
+    if _symm_mem_timeout is None:
+        _symm_mem_timeout = float(os.environ.get("TORCH_SYMM_MEM_TIMEOUT", "600"))
+    return _symm_mem_timeout
+
+
+def _timed_barrier(
+    symm_mem: _SymmetricMemory, *, channel: int = 0, group_name: str = ""
+) -> None:
+    """Call barrier() then register a stream_timeout to detect hangs.
+
+    The CUDA event is recorded AFTER the barrier kernel, so if the barrier
+    spins forever, the event never completes and the watchdog fires.
+    """
+    symm_mem.barrier(channel=channel)
+    timeout = _get_symm_mem_timeout()
+    if timeout <= 0:
+        return
+    from torch.distributed._pybackend_watchdog import stream_timeout
+
+    rank = symm_mem.rank
+
+    def on_timeout() -> None:
+        _symm_mem_logger.error(
+            "Symmetric memory barrier timed out "
+            "(group=%s, rank=%d, channel=%d, timeout=%.1fs)",
+            group_name,
+            rank,
+            channel,
+            timeout,
+        )
+
+    stream_timeout(timeout, on_timeout)
+
+
+def _timed_rendezvous(
+    tensor: torch.Tensor, group_name: str | None = None
+) -> _SymmetricMemory:
+    """Call _SymmetricMemory.rendezvous() with a cpu_timeout to detect hangs."""
+    timeout = _get_symm_mem_timeout()
+    if timeout <= 0:
+        return _SymmetricMemory.rendezvous(tensor, group_name)
+    from torch.distributed._pybackend_watchdog import cpu_timeout
+
+    def on_timeout() -> None:
+        _symm_mem_logger.error(
+            "Symmetric memory rendezvous timed out (group=%s, timeout=%.1fs)",
+            group_name,
+            timeout,
+        )
+
+    handle = cpu_timeout(timeout, on_timeout)
+    result = _SymmetricMemory.rendezvous(tensor, group_name)
+    handle.cancel()
+    return result
+
 
 def get_symm_mem_workspace(
     group_name: c10d.GroupName, min_size: int
@@ -135,7 +198,7 @@ def get_symm_mem_workspace(
             group_name,
         )
         _group_name_to_workspace_tensor[group_name] = tensor
-    return _SymmetricMemory.rendezvous(tensor)
+    return _timed_rendezvous(tensor, group_name)
 
 
 _backend_streams: dict[int, torch.Stream] = {}
@@ -178,7 +241,7 @@ def _pipelined_multi_all_gather_and_consume(
     group_size = symm_mem.world_size
     rank = symm_mem.rank
 
-    symm_mem.barrier(channel=0)
+    _timed_barrier(symm_mem, channel=0, group_name=group_name)
     backend_stream = _get_backend_stream()
     backend_stream.wait_stream(torch.accelerator.current_stream())
 
@@ -264,7 +327,7 @@ def _pipelined_multi_all_gather_and_consume(
     # prevent suboptimal scenarios, we are giving up the chance to overlap "mv"
     # and "b" with the first shard_consumer for now.
     copy_shard(dst=local_p2p_bufs, src=shard)
-    symm_mem.barrier(channel=1)
+    _timed_barrier(symm_mem, channel=1, group_name=group_name)
     backend_stream.wait_stream(torch.accelerator.current_stream())
 
     # At this point, all ranks have copied their local shard to
@@ -294,7 +357,7 @@ def _pipelined_multi_all_gather_and_consume(
             copy_shard(dst=shards[rank], src=shard)
 
     torch.accelerator.current_stream().wait_stream(backend_stream)
-    symm_mem.barrier(channel=0)
+    _timed_barrier(symm_mem, channel=0, group_name=group_name)
 
 
 def _pipelined_all_gather_and_consume(
@@ -350,7 +413,7 @@ def _pipelined_produce_and_all2all(
     group_size = symm_mem.world_size
     rank = symm_mem.rank
 
-    symm_mem.barrier(channel=0)
+    _timed_barrier(symm_mem, channel=0, group_name=group_name)
     backend_stream = _get_backend_stream()
     backend_stream.wait_stream(torch.accelerator.current_stream())
 
@@ -429,11 +492,11 @@ def _pipelined_produce_and_all2all(
             if step == 2 and torch.cuda.is_available():
                 torch.cuda._sleep(100)
             chunk_producer((rank + step) % group_size, p2p_buf)
-            symm_mem.barrier(channel=step % 2)
+            _timed_barrier(symm_mem, channel=step % 2, group_name=group_name)
             out_chunks[remote_rank].copy_(remote_p2p_buf)
             # The local P2P buffer can only be overwritten by the next
             # chunk_producer after all peers have finished reading from it.
-            symm_mem.barrier(channel=step % 2)
+            _timed_barrier(symm_mem, channel=step % 2, group_name=group_name)
 
     # If the sleep wasn't issued in the above loop, do it now.
     if group_size == 2 and torch.cuda.is_available():
@@ -441,7 +504,7 @@ def _pipelined_produce_and_all2all(
 
     chunk_producer(rank, out_chunks[rank])
     torch.accelerator.current_stream().wait_stream(backend_stream)
-    symm_mem.barrier(channel=0)
+    _timed_barrier(symm_mem, channel=0, group_name=group_name)
 
 
 lib = torch.library.Library("symm_mem", "DEF")
@@ -711,7 +774,7 @@ def _pipelined_all_gather_and_consume_last_dim(
     group_size = symm_mem.world_size
     rank = symm_mem.rank
 
-    symm_mem.barrier(channel=0)
+    _timed_barrier(symm_mem, channel=0, group_name=group_name)
     backend_stream = _get_backend_stream()
     backend_stream.wait_stream(torch.accelerator.current_stream())
 
@@ -731,7 +794,7 @@ def _pipelined_all_gather_and_consume_last_dim(
     shards = ag_out.chunk(group_size)
 
     copy_shard(dst=local_p2p_buf, src=shard)
-    symm_mem.barrier(channel=1)
+    _timed_barrier(symm_mem, channel=1, group_name=group_name)
     backend_stream.wait_stream(torch.accelerator.current_stream())
 
     # At this point, all ranks have copied their local shard to
@@ -761,7 +824,7 @@ def _pipelined_all_gather_and_consume_last_dim(
             copy_shard(dst=shards[rank], src=shard)
 
     torch.accelerator.current_stream().wait_stream(backend_stream)
-    symm_mem.barrier(channel=0)
+    _timed_barrier(symm_mem, channel=0, group_name=group_name)
 
 
 def _fused_all_gather_matmul_last_gather_dim_impl(
@@ -951,7 +1014,7 @@ def _fused_all_gather_matmul_native(
         symm_mem = get_symm_mem_workspace(
             group_name, A_shard.numel() * A_shard.element_size()
         )
-        symm_mem.barrier()
+        _timed_barrier(symm_mem, group_name=group_name)
         buf = symm_mem.get_buffer(symm_mem.rank, A_shard.shape, A_shard.dtype)
         buf.copy_(A_shard)
         A_shard = buf
@@ -962,7 +1025,7 @@ def _fused_all_gather_matmul_native(
     current_stream = torch.cuda.current_stream()
     backend_stream = _get_backend_stream(priority=-1)
 
-    symm_mem.barrier()
+    _timed_barrier(symm_mem, group_name=group_name)
     backend_stream.wait_stream(current_stream)
     current_stream.wait_stream(backend_stream)
 
@@ -991,7 +1054,7 @@ def _fused_all_gather_matmul_native(
     current_stream.wait_stream(backend_stream)
     backend_stream.wait_stream(current_stream)
 
-    symm_mem.barrier()
+    _timed_barrier(symm_mem, group_name=group_name)
     return A, out
 
 
@@ -1739,12 +1802,12 @@ def _low_contention_all_gather(
             local_buf = symm_mem.get_buffer(rank, tensor.shape, tensor.dtype)
             local_buf.copy_(tensor)
         # pull
-        symm_mem.barrier()
+        _timed_barrier(symm_mem, group_name=group_name)
         for step in range(world_size):
             remote_rank = (rank - step) % world_size
             src_buf = symm_mem.get_buffer(remote_rank, tensor.shape, tensor.dtype)
             chunks[remote_rank].copy_(src_buf)
-        symm_mem.barrier()
+        _timed_barrier(symm_mem, group_name=group_name)
         torch._C._distributed_c10d._register_work(output, Work())
         return output
 
@@ -1888,11 +1951,15 @@ def _low_contention_all_gather_ce_multicast_impl(
     shard_bytes = tensor.numel() * tensor.element_size()
 
     ag_input = tensor if tensor.is_contiguous() else tensor.contiguous()
-    symm_mem.barrier(channel=_CE_MULTICAST_BARRIER_CHANNEL)
+    _timed_barrier(
+        symm_mem, channel=_CE_MULTICAST_BARRIER_CHANNEL, group_name=group_name
+    )
     torch.ops.symm_mem.memcpy_to_multicast_(
         output, ag_input, rank * shard_bytes, group_name
     )
-    symm_mem.barrier(channel=_CE_MULTICAST_BARRIER_CHANNEL)
+    _timed_barrier(
+        symm_mem, channel=_CE_MULTICAST_BARRIER_CHANNEL, group_name=group_name
+    )
     return output
 
 
@@ -1910,6 +1977,7 @@ def _low_contention_reduce_scatter_with_symm_mem_input(
     tensor: torch.Tensor,
     reduce_op: str,
     symm_mem: _SymmetricMemory,
+    group_name: str = "",
 ) -> torch.Tensor:
     rank = symm_mem.rank
     world_size = symm_mem.world_size
@@ -1922,7 +1990,7 @@ def _low_contention_reduce_scatter_with_symm_mem_input(
     _get_backend_stream().wait_stream(torch.accelerator.current_stream())
     with _get_backend_stream():
         # pull + offline reduction
-        symm_mem.barrier()
+        _timed_barrier(symm_mem, group_name=group_name)
         for step in range(world_size):
             remote_rank = (rank - step) % world_size
             src_buf = symm_mem.get_buffer(
@@ -1932,7 +2000,7 @@ def _low_contention_reduce_scatter_with_symm_mem_input(
                 chunks[0].numel() * rank,
             )
             chunks[remote_rank].copy_(src_buf)
-        symm_mem.barrier()
+        _timed_barrier(symm_mem, group_name=group_name)
 
         ret = a2a_res.unflatten(0, (world_size, -1))
         if reduce_op == "sum":
@@ -1949,6 +2017,7 @@ def _low_contention_reduce_scatter_with_workspace(
     tensor: torch.Tensor,
     reduce_op: str,
     workspace: _SymmetricMemory,
+    group_name: str = "",
 ) -> torch.Tensor:
     rank = workspace.rank
     world_size = workspace.world_size
@@ -1960,14 +2029,14 @@ def _low_contention_reduce_scatter_with_workspace(
     _get_backend_stream().wait_stream(torch.accelerator.current_stream())
     with _get_backend_stream():
         # push + offline reduction
-        workspace.barrier()
+        _timed_barrier(workspace, group_name=group_name)
         for step in range(world_size):
             remote_rank = (rank - step) % world_size
             dst_buf = workspace.get_buffer(
                 remote_rank, chunks[0].shape, chunks[0].dtype, chunks[0].numel() * rank
             )
             dst_buf.copy_(chunks[remote_rank])
-        workspace.barrier()
+        _timed_barrier(workspace, group_name=group_name)
 
         buf = workspace.get_buffer(rank, tensor.shape, tensor.dtype)
         ret = buf.unflatten(0, (world_size, -1))
@@ -2011,14 +2080,14 @@ def _low_contention_reduce_scatter(
     symm_mem = rendezvous(tensor, group_name)
     if symm_mem is not None:
         return _low_contention_reduce_scatter_with_symm_mem_input(
-            tensor, reduce_op, symm_mem
+            tensor, reduce_op, symm_mem, group_name=group_name
         )
     else:
         workspace = get_symm_mem_workspace(
             group_name, tensor.numel() * tensor.element_size()
         )
         return _low_contention_reduce_scatter_with_workspace(
-            tensor, reduce_op, workspace
+            tensor, reduce_op, workspace, group_name=group_name
         )
 
 
@@ -2170,7 +2239,7 @@ def rendezvous(
             participating processes. This can be either a group name or a process group object.
     """
     group_name = _resolve_group_name(group)
-    return _SymmetricMemory.rendezvous(tensor, group_name)
+    return _timed_rendezvous(tensor, group_name)
 
 
 def is_nvshmem_available() -> bool:

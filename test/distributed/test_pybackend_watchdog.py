@@ -1,10 +1,13 @@
 # Owner(s): ["oncall: distributed"]
 
 import asyncio
+import os
 import threading
 import time
 from unittest.mock import MagicMock, patch
 
+import torch
+import torch.distributed as dist
 from torch.distributed._pybackend_watchdog import (
     _CancelHandle,
     _PyBackendWatchdog,
@@ -13,6 +16,10 @@ from torch.distributed._pybackend_watchdog import (
     get_watchdog,
     op_timeout,
     shutdown,
+)
+from torch.testing._internal.common_distributed import (
+    MultiProcessTestCase,
+    skip_if_lt_x_gpu,
 )
 from torch.testing._internal.common_utils import run_tests, TestCase
 
@@ -266,6 +273,144 @@ class TestPyBackendWatchdog(TestCase):
                 self.assertFalse(fired.is_set(), "callback fired despite cancel")
             finally:
                 wd.shutdown()
+
+
+class TestWatchdogSymmMemIntegration(MultiProcessTestCase):
+    """Multi-GPU tests verifying the watchdog is wired into symm_mem."""
+
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    def setUp(self) -> None:
+        super().setUp()
+        os.environ["TORCH_SYMM_MEM_TIMEOUT"] = "600"
+        import torch.distributed._symmetric_memory as sm
+
+        sm._symm_mem_timeout = None
+        self._spawn_processes()
+
+    def tearDown(self) -> None:
+        super().tearDown()
+
+    @skip_if_lt_x_gpu(2)
+    def test_barrier_calls_stream_timeout(self) -> None:
+        dist.init_process_group(
+            "nccl",
+            rank=self.rank,
+            world_size=self.world_size,
+            store=dist.FileStore(self.file_name, self.world_size),
+        )
+        torch.cuda.set_device(self.rank)
+        group_name = dist.group.WORLD.group_name
+
+        import torch.distributed._pybackend_watchdog as wd
+        from torch.distributed._symmetric_memory import (
+            _timed_barrier,
+            get_symm_mem_workspace,
+        )
+
+        symm_mem = get_symm_mem_workspace(group_name, 1024)
+
+        original_st = wd.stream_timeout
+        call_count = 0
+
+        def counting_st(timeout, callback):
+            nonlocal call_count
+            call_count += 1
+            return original_st(timeout, callback)
+
+        with patch.object(wd, "stream_timeout", side_effect=counting_st):
+            _timed_barrier(symm_mem, channel=0, group_name=group_name)
+
+        self.assertEqual(
+            call_count, 1, "stream_timeout should be called once per barrier"
+        )
+        wd.shutdown()
+        dist.destroy_process_group()
+
+    @skip_if_lt_x_gpu(2)
+    def test_rendezvous_calls_cpu_timeout(self) -> None:
+        dist.init_process_group(
+            "nccl",
+            rank=self.rank,
+            world_size=self.world_size,
+            store=dist.FileStore(self.file_name, self.world_size),
+        )
+        torch.cuda.set_device(self.rank)
+        group_name = dist.group.WORLD.group_name
+
+        import torch.distributed._pybackend_watchdog as wd
+        from torch._C._distributed_c10d import _SymmetricMemory
+        from torch.distributed._symmetric_memory import _timed_rendezvous
+
+        t = _SymmetricMemory.empty_strided_p2p(
+            (1024,),
+            [1],
+            torch.uint8,
+            torch.device(f"cuda:{self.rank}"),
+            group_name,
+        )
+
+        original_ct = wd.cpu_timeout
+        call_count = 0
+
+        def counting_ct(timeout, callback):
+            nonlocal call_count
+            call_count += 1
+            return original_ct(timeout, callback)
+
+        with patch.object(wd, "cpu_timeout", side_effect=counting_ct):
+            result = _timed_rendezvous(t, group_name)
+
+        self.assertEqual(
+            call_count, 1, "cpu_timeout should be called once per rendezvous"
+        )
+        self.assertIsNotNone(result)
+        wd.shutdown()
+        dist.destroy_process_group()
+
+    @skip_if_lt_x_gpu(2)
+    def test_disabled_when_timeout_zero(self) -> None:
+        os.environ["TORCH_SYMM_MEM_TIMEOUT"] = "0"
+        import torch.distributed._symmetric_memory as sm
+
+        sm._symm_mem_timeout = None
+
+        dist.init_process_group(
+            "nccl",
+            rank=self.rank,
+            world_size=self.world_size,
+            store=dist.FileStore(self.file_name, self.world_size),
+        )
+        torch.cuda.set_device(self.rank)
+        group_name = dist.group.WORLD.group_name
+
+        import torch.distributed._pybackend_watchdog as wd
+        from torch.distributed._symmetric_memory import (
+            _timed_barrier,
+            get_symm_mem_workspace,
+        )
+
+        original_st = wd.stream_timeout
+        call_count = 0
+
+        def counting_st(timeout, callback):
+            nonlocal call_count
+            call_count += 1
+            return original_st(timeout, callback)
+
+        symm_mem = get_symm_mem_workspace(group_name, 1024)
+
+        with patch.object(wd, "stream_timeout", side_effect=counting_st):
+            _timed_barrier(symm_mem, channel=0, group_name=group_name)
+
+        self.assertEqual(
+            call_count, 0, "stream_timeout should NOT be called when timeout=0"
+        )
+
+        sm._symm_mem_timeout = None
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
