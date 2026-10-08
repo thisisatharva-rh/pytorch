@@ -1,0 +1,93 @@
+{
+  "world_size": 2,
+  "baseline": {
+    "backend": "nccl"
+  },
+  "candidate": {
+    "backend": "symmem",
+    "imports": [
+      "torch.distributed._pysymmem"
+    ],
+    "env": {
+      "SYMMEM_COLLECTIVE_IMPL": "copy",
+      "SYMMEM_WORKSPACE_BYTES": "134217728"
+    }
+  },
+  "timing": {
+    "warmup": 2,
+    "iterations": 3,
+    "trials": 3,
+    "validation_steps": 4,
+    "timeout_seconds": 90,
+    "modes": [
+      "eager",
+      "graph"
+    ]
+  },
+  "cases": [
+    {
+      "name": "ar",
+      "op": "all_reduce",
+      "dtype": "float32",
+      "counts": [
+        1024,
+        1024
+      ]
+    },
+    {
+      "name": "broadcast",
+      "op": "broadcast",
+      "dtype": "bfloat16",
+      "root": 1,
+      "counts": [
+        513,
+        513
+      ]
+    },
+    {
+      "name": "uneven_ag",
+      "op": "all_gather",
+      "dtype": "bfloat16",
+      "counts": [
+        513,
+        17
+      ]
+    },
+    {
+      "name": "uneven_rs",
+      "op": "reduce_scatter",
+      "dtype": "float32",
+      "counts": [
+        513,
+        17
+      ]
+    },
+    {
+      "name": "a2a",
+      "op": "all_to_all",
+      "dtype": "float32",
+      "counts": [
+        1024,
+        1024
+      ]
+    },
+    {
+      "name": "empty_owner_ag",
+      "op": "all_gather",
+      "dtype": "float32",
+      "counts": [
+        0,
+        19
+      ]
+    },
+    {
+      "name": "empty_owner_rs",
+      "op": "reduce_scatter",
+      "dtype": "bfloat16",
+      "counts": [
+        19,
+        0
+      ]
+    }
+  ]
+}
