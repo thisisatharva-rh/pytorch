@@ -495,18 +495,62 @@ class TestNIXLTransport(TransportTestMixin, TestCase):
             future = work.get_future()
             ready = asyncio.Event()
             future.add_done_callback(lambda _: ready.set())
-
-            async def finish():
-                await asyncio.sleep(0.01)
-                first._agent.transfer_state = "DONE"
-
-            task = asyncio.create_task(finish())
+            first._agent.transfer_state = "DONE"
             await asyncio.wait_for(ready.wait(), 1)
-            await task
             self.assertEqual(future.wait(), [])
             await wait_all([work])
 
         asyncio.run(run())
+
+    def test_future_callback_closes_transport(self):
+        first, second, source, remote = self.registered_pair()
+        agent = first._agent
+        agent.transfer_state = "PROC"
+        work = first.write(source.to_view(), remote, async_op=True)
+        ready = threading.Event()
+        future = work.get_future().then(lambda _: first.close())
+        future.add_done_callback(lambda _: ready.set())
+        agent.transfer_state = "DONE"
+        self.assertTrue(ready.wait(5))
+        future.wait()
+        self.assertTrue(first._closed)
+        self.assertEqual(agent.released, 1)
+
+    @parametrize("async_close", [False, True])
+    def test_future_poll_after_close(self, async_close):
+        first, second, source, remote = self.registered_pair()
+        agent = first._agent
+        agent.transfer_state = "PROC"
+        work = first.write(source.to_view(), remote, async_op=True)
+        polling = threading.Event()
+        resume = threading.Event()
+        caller = threading.current_thread()
+        poll = work._poll
+
+        def delayed_poll():
+            if threading.current_thread() is not caller:
+                polling.set()
+                if not resume.wait(5):
+                    raise RuntimeError("test did not release the progress worker")
+            return poll()
+
+        with patch.object(work, "_poll", side_effect=delayed_poll):
+            future = work.get_future()
+            worker = first._future_progress._thread
+            try:
+                self.assertTrue(polling.wait(5))
+                agent.transfer_state = "DONE"
+                if async_close:
+                    asyncio.run(first.close_async())
+                else:
+                    first.close()
+                self.assertTrue(first._closed)
+                self.assertTrue(future.done())
+            finally:
+                resume.set()
+                worker.join(5)
+            self.assertFalse(worker.is_alive())
+        self.assertEqual(agent.released, 1)
 
     def test_async_close_timeout_and_retry(self):
         first, second, source, remote = self.registered_pair()
@@ -539,12 +583,15 @@ class TestNIXLTransport(TransportTestMixin, TestCase):
                     await task
                 self.assertTrue(first._pending)
                 self.assertEqual(first._agent.released, 0)
+                return first._future_progress._thread
 
-        asyncio.run(run(source))
+        worker = asyncio.run(run(source))
         del source, tensor
         gc.collect()
         self.assertIsNotNone(ref())
         first.close()
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
         gc.collect()
         self.assertIsNone(ref())
 

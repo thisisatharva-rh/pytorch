@@ -20,7 +20,7 @@ from ._memory import (
     NIXLMutableMemoryView,
     NIXLRemoteBuffer,
 )
-from ._work import _live_transports, _NIXLWork
+from ._work import _FutureProgress, _live_transports, _NIXLWork
 
 
 if TYPE_CHECKING:
@@ -102,6 +102,7 @@ class NIXLTransport(Transport):
         self._transfers: dict[int, Any] = {}
         self._pending: dict[int, _NIXLWork] = {}
         self._operation_lock = RLock()
+        self._future_progress = _FutureProgress()
         # Lifecycle: open -> closing -> closed. Closing rejects new operations and
         # is terminal; a failed or timed-out close retains unreleased resources
         # and retrying close only finishes cleanup. Failed transfer-handle or

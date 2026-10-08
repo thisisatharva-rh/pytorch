@@ -3,6 +3,8 @@
 import asyncio
 import multiprocessing
 import os
+import threading
+import time
 import unittest
 
 import torch
@@ -16,16 +18,34 @@ from torch.testing._internal.common_utils import (
 )
 
 
-def _receive(connection):
-    if not connection.poll(10):
-        raise TimeoutError("peer did not send control-plane metadata")
+def _receive(connection, transport=None):
+    deadline = time.monotonic() + 10
+    while not connection.poll(0.001 if transport is not None else 10):
+        if time.monotonic() >= deadline:
+            raise TimeoutError("peer did not send control-plane metadata")
+        if transport is not None:
+            # Without native progress, service incoming UCX requests even after
+            # our own transfers finish, while the peer is still transferring.
+            with transport._operation_lock:
+                transport._agent.get_new_notifs()
     return connection.recv_bytes()
 
 
-def _native_worker(rank, connection, progress_thread):
+def _wait_futures(works):
+    ready = threading.Event()
+    future = torch.futures.collect_all([work.get_future() for work in works])
+    future.add_done_callback(lambda _: ready.set())
+    if not ready.wait(5):
+        raise TimeoutError("native transfer futures did not complete")
+    for completed in future.wait():
+        completed.wait()
+
+
+def _native_worker(rank, connection, progress_thread, use_future):
     with new_transport(
         "nixl", "cpu", timeout=5, enable_prog_thread=progress_thread
     ) as transport:
+        peer_progress = None if progress_thread else transport
         connection.send_bytes(transport.bind())
         transport.connect(_receive(connection))
         source = torch.arange(1024, dtype=torch.float32) + rank
@@ -43,24 +63,36 @@ def _native_worker(rank, connection, progress_thread):
         other_work = transport.write(
             source_memory.to_view(), remote_other, async_op=True
         )
-        asyncio.run(wait_all([work, other_work], timeout=5))
+        if use_future:
+            _wait_futures([work, other_work])
+        else:
+            asyncio.run(wait_all([work, other_work], timeout=5))
         connection.send_bytes(b"written")
-        if _receive(connection) != b"written":
+        if _receive(connection, peer_progress) != b"written":
             raise AssertionError("unexpected control-plane message")
         torch.testing.assert_close(
             target, torch.arange(1024, dtype=torch.float32) + 1 - rank
         )
         torch.testing.assert_close(other_target, target)
-        asyncio.run(
-            transport.read_async(
-                target_memory.to_mutable_view(), remote_source, timeout=5
+        if use_future:
+            _wait_futures(
+                [
+                    transport.read(
+                        target_memory.to_mutable_view(), remote_source, async_op=True
+                    )
+                ]
             )
-        )
+        else:
+            asyncio.run(
+                transport.read_async(
+                    target_memory.to_mutable_view(), remote_source, timeout=5
+                )
+            )
         torch.testing.assert_close(
             target, torch.arange(1024, dtype=torch.float32) + 1 - rank
         )
         connection.send_bytes(b"finished")
-        if _receive(connection) != b"finished":
+        if _receive(connection, peer_progress) != b"finished":
             raise AssertionError("unexpected control-plane message")
         for memory in (source_memory, target_memory, other_memory):
             transport.unregister_memory(memory)
@@ -78,7 +110,7 @@ def _native_worker(rank, connection, progress_thread):
         remote_target = NIXLRemoteBuffer.deserialize(_receive(connection))
         transport.write(source_memory.to_view(), remote_target)
         connection.send_bytes(b"rewritten")
-        if _receive(connection) != b"rewritten":
+        if _receive(connection, peer_progress) != b"rewritten":
             raise AssertionError("unexpected control-plane message")
         torch.testing.assert_close(
             target, torch.arange(1024, dtype=torch.float32) + 11 - rank
@@ -97,11 +129,19 @@ def _native_worker(rank, connection, progress_thread):
 class TestNIXLNative(TestCase):
     @parametrize("progress_thread", [True, False])
     def test_two_process_cpu_transfers(self, progress_thread):
+        self._check_transfers(progress_thread, use_future=False)
+
+    @parametrize("progress_thread", [True, False])
+    def test_two_process_cpu_futures(self, progress_thread):
+        self._check_transfers(progress_thread, use_future=True)
+
+    def _check_transfers(self, progress_thread, use_future):
         context = multiprocessing.get_context("spawn")
         connections = context.Pipe()
         processes = [
             context.Process(
-                target=_native_worker, args=(rank, connections[rank], progress_thread)
+                target=_native_worker,
+                args=(rank, connections[rank], progress_thread, use_future),
             )
             for rank in range(2)
         ]

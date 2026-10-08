@@ -22,6 +22,47 @@ if TYPE_CHECKING:
 _live_transports: set[NIXLTransport] = set()
 
 
+class _FutureProgress:
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._works: dict[int, _PollingWork] = {}
+        self._thread: threading.Thread | None = None
+
+    def add(self, work: _PollingWork, loop: asyncio.AbstractEventLoop | None) -> None:
+        with self._condition:
+            if id(work) in self._works:
+                return
+            work._future_loop = loop
+            self._works[id(work)] = work
+            if self._thread is None:
+                try:
+                    self._thread = threading.Thread(
+                        target=self._run, name="nixl-future-progress", daemon=True
+                    )
+                    self._thread.start()
+                except Exception:
+                    self._thread = None
+                    del self._works[id(work)]
+                    raise
+            self._condition.notify()
+
+    def _run(self) -> None:
+        while True:
+            with self._condition:
+                if not self._works:
+                    self._thread = None
+                    return
+                works = list(self._works.values())
+            # Polling resolves futures and runs user callbacks. Neither the
+            # progress lock nor the transport lock may be held for callbacks.
+            completed = [id(work) for work in works if work._progress_future()]
+            with self._condition:
+                for key in completed:
+                    self._works.pop(key, None)
+                if self._works:
+                    self._condition.wait(timeout=0.001)
+
+
 class _PollingWork(Work):
     """Work that resolves a future from backend status checks.
 
@@ -30,7 +71,7 @@ class _PollingWork(Work):
     unless it establishes that the backend has stopped accessing memory.
     """
 
-    def __init__(self, timeout: float | None = None) -> None:
+    def __init__(self, progress: _FutureProgress, timeout: float | None = None) -> None:
         super().__init__()
         _validate_timeout(timeout)
         self._timeout = timeout
@@ -38,10 +79,40 @@ class _PollingWork(Work):
         self._future: torch.futures.Future[Any] = torch.futures.Future()
         self._future_lock = threading.Lock()
         self._future_completed = False
-        self._progress_task: asyncio.Task[None] | None = None
+        self._future_loop: asyncio.AbstractEventLoop | None = None
+        self._future_poll_scheduled = False
+        self._progress = progress
 
     def _poll(self) -> bool:
         raise NotImplementedError
+
+    def _progress_future(self) -> bool:
+        with self._future_lock:
+            if self._future_completed:
+                return True
+            loop = self._future_loop
+            # Preserve polling and callback affinity while the requesting loop runs.
+            if loop is not None and loop.is_running():
+                if self._future_poll_scheduled:
+                    return False
+                self._future_poll_scheduled = True
+                try:
+                    loop.call_soon_threadsafe(self._poll_on_loop)
+                except RuntimeError:
+                    self._future_poll_scheduled = False
+                    if not loop.is_closed():
+                        raise
+                else:
+                    return False
+        # A stopped loop may still have a queued poll that will never execute.
+        return self.is_completed()
+
+    def _poll_on_loop(self) -> None:
+        try:
+            self.is_completed()
+        finally:
+            with self._future_lock:
+                self._future_poll_scheduled = False
 
     def is_completed(self) -> bool:
         if not self._poll():
@@ -83,16 +154,13 @@ class _PollingWork(Work):
     def exception(self) -> BaseException | None:
         return self._error if self.is_completed() else None
 
-    async def _drive_future(self) -> None:
-        while not self.is_completed():
-            await asyncio.sleep(0.001)
-
     def get_future(self) -> torch.futures.Future[list[torch.Tensor]]:
-        if self.is_completed():
-            return self._future
-        loop = asyncio.get_running_loop()
-        if self._progress_task is None or self._progress_task.done():
-            self._progress_task = loop.create_task(self._drive_future())
+        if not self.is_completed():
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            self._progress.add(self, loop)
         return self._future
 
     def result(self) -> list[torch.Tensor]:
@@ -111,7 +179,7 @@ class _NIXLWork(_PollingWork):
         remote: NIXLRemoteBuffer,
         timeout: float,
     ) -> None:
-        super().__init__(timeout)
+        super().__init__(transport._future_progress, timeout)
         self._transport = transport
         self._buffers = (local, remote)
         self._descriptors: Any = None
