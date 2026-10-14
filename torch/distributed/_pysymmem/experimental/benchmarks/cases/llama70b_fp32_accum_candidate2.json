@@ -1,0 +1,231 @@
+{
+  "world_size": 8,
+  "baseline": {
+    "backend": "nccl",
+    "all_reduce_accumulation": "float32"
+  },
+  "candidate": {
+    "backend": "symmem_fp32_accum_candidate2",
+    "imports": [
+      "torch.distributed._pysymmem.experimental"
+    ],
+    "env": {
+      "SYMMEM_WORKSPACE_BYTES": "4294967296"
+    }
+  },
+  "timing": {
+    "warmup": 10,
+    "iterations": 30,
+    "trials": 7,
+    "validation_steps": 4,
+    "timeout_seconds": 180,
+    "modes": [
+      "eager",
+      "graph"
+    ]
+  },
+  "cases": [
+    {
+      "name": "llama70b_param_8192",
+      "op": "all_reduce",
+      "dtype": "bfloat16",
+      "counts": [
+        8192,
+        8192,
+        8192,
+        8192,
+        8192,
+        8192,
+        8192,
+        8192
+      ],
+      "parameters": [
+        {
+          "name": "attention_norm",
+          "shape": [
+            8192
+          ],
+          "group": "transformer_block"
+        },
+        {
+          "name": "ffn_norm",
+          "shape": [
+            8192
+          ],
+          "group": "transformer_block"
+        },
+        {
+          "name": "norm",
+          "shape": [
+            8192
+          ],
+          "group": "output_head"
+        }
+      ],
+      "bf16_bytes_per_rank": 16384
+    },
+    {
+      "name": "llama70b_param_67108864",
+      "op": "all_reduce",
+      "dtype": "bfloat16",
+      "counts": [
+        67108864,
+        67108864,
+        67108864,
+        67108864,
+        67108864,
+        67108864,
+        67108864,
+        67108864
+      ],
+      "parameters": [
+        {
+          "name": "attention.wo",
+          "shape": [
+            8192,
+            8192
+          ],
+          "group": "transformer_block"
+        }
+      ],
+      "bf16_bytes_per_rank": 134217728
+    },
+    {
+      "name": "llama70b_param_83886080",
+      "op": "all_reduce",
+      "dtype": "bfloat16",
+      "counts": [
+        83886080,
+        83886080,
+        83886080,
+        83886080,
+        83886080,
+        83886080,
+        83886080,
+        83886080
+      ],
+      "parameters": [
+        {
+          "name": "attention.wqkv",
+          "shape": [
+            8,
+            10,
+            128,
+            8192
+          ],
+          "group": "transformer_block"
+        }
+      ],
+      "bf16_bytes_per_rank": 167772160
+    },
+    {
+      "name": "llama70b_param_234881024",
+      "op": "all_reduce",
+      "dtype": "bfloat16",
+      "counts": [
+        234881024,
+        234881024,
+        234881024,
+        234881024,
+        234881024,
+        234881024,
+        234881024,
+        234881024
+      ],
+      "parameters": [
+        {
+          "name": "feed_forward.w2",
+          "shape": [
+            8192,
+            28672
+          ],
+          "group": "transformer_block"
+        }
+      ],
+      "bf16_bytes_per_rank": 469762048
+    },
+    {
+      "name": "llama70b_param_469762048",
+      "op": "all_reduce",
+      "dtype": "bfloat16",
+      "counts": [
+        469762048,
+        469762048,
+        469762048,
+        469762048,
+        469762048,
+        469762048,
+        469762048,
+        469762048
+      ],
+      "parameters": [
+        {
+          "name": "feed_forward.w13",
+          "shape": [
+            2,
+            28672,
+            8192
+          ],
+          "group": "transformer_block"
+        }
+      ],
+      "bf16_bytes_per_rank": 939524096
+    },
+    {
+      "name": "llama70b_param_1050673152",
+      "op": "all_reduce",
+      "dtype": "bfloat16",
+      "counts": [
+        1050673152,
+        1050673152,
+        1050673152,
+        1050673152,
+        1050673152,
+        1050673152,
+        1050673152,
+        1050673152
+      ],
+      "parameters": [
+        {
+          "name": "tok_embeddings",
+          "shape": [
+            128256,
+            8192
+          ],
+          "group": "embedding"
+        },
+        {
+          "name": "lm_head",
+          "shape": [
+            128256,
+            8192
+          ],
+          "group": "output_head"
+        }
+      ],
+      "bf16_bytes_per_rank": 2101346304
+    }
+  ],
+  "workload_provenance": {
+    "model": "Llama 3.1 70B with TorchTitan-style fused parameters",
+    "primary_sources": {
+      "https://raw.githubusercontent.com/meta-llama/llama-models/main/models/sku_list.py": {
+        "sha256": "a71a8ca23c8daf3d1daec02c13e9916c36e315c5056b56ed20b18df98d10c486",
+        "path": "/home/devuser/pytorch/agent_space/llama70b_fp32_accum/sku_list.py"
+      },
+      "https://raw.githubusercontent.com/meta-llama/llama-models/main/models/llama3/model.py": {
+        "sha256": "ff135f051d66b03a9e32789966d2be84186a00b90cef398c05b10f7e9d2a7dc3",
+        "path": "/home/devuser/pytorch/agent_space/llama70b_fp32_accum/model.py"
+      }
+    },
+    "shapes": {
+      "dim": 8192,
+      "hidden_dim": 28672,
+      "vocab_size": 128256,
+      "layers": 80,
+      "query_heads": 64,
+      "kv_heads": 8
+    },
+    "scope": "Full parameter-sized BF16 buffers replicated on every rank. Fused QKV and gate/up sizes derived from Meta architecture dimensions with the same layout convention as the 8B run. Not measured training buckets, sharded gradients, or full model execution."
+  }
+}
