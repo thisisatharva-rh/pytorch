@@ -1,0 +1,414 @@
+{
+  "world_size": 8,
+  "baseline": {
+    "backend": "nccl"
+  },
+  "candidate": {
+    "backend": "symmem_uneven",
+    "imports": [
+      "torch.distributed._pysymmem.experimental"
+    ],
+    "env": {
+      "SYMMEM_WORKSPACE_BYTES": "4294967296"
+    }
+  },
+  "timing": {
+    "warmup": 10,
+    "iterations": 30,
+    "trials": 7,
+    "validation_steps": 3,
+    "timeout_seconds": 120,
+    "modes": [
+      "eager",
+      "graph"
+    ]
+  },
+  "workload_provenance": {
+    "model": "TorchTitan Llama 3.1 8B",
+    "world_size": 8,
+    "tensor_parallel_size": 1,
+    "pipeline_parallel_size": 1,
+    "torchtitan_commit": "847f98a6f4067b055c0e3c26dd826e3e34022483",
+    "source_sha256": {
+      "torchtitan/models/llama3/__init__.py": "e320200fccabb9dd75a5845595dd8256c110fb3016b66947fe05220aa58b4872",
+      "torchtitan/models/common/config_utils.py": "172b898220e3b7b3e84efb101e745f64149a8fc2211663189f62491e0289e58b",
+      "torchtitan/models/common/feed_forward.py": "fdddafb3845d9b4f2c8485e5136a455f3191a7f7b251946153ec376ddc08aa36",
+      "torchtitan/distributed/fsdp.py": "122fe0769f6cdafd3cfad16df7720a8d4169de02573d49daf30eda6e3ee55e5d"
+    },
+    "ownership": "Whole physical parameters, descending numel, assign to least-loaded rank; ties use rank order.",
+    "grouping": "TorchTitan FSDP groups: one transformer block, embedding, and norm plus lm_head.",
+    "limitation": "Model-derived owner splits. TorchTitan normally shards parameters; this is not a measured TensorAtomic trace.",
+    "shapes": {
+      "dim": 4096,
+      "hidden_dim": 14336,
+      "vocab_size": 128256,
+      "layers": 32,
+      "query_heads": 32,
+      "kv_heads": 8
+    },
+    "cases": [
+      {
+        "name": "transformer_block",
+        "counts": [
+          117440512,
+          58720256,
+          25165824,
+          16777216,
+          4096,
+          4096,
+          0,
+          0
+        ],
+        "copies_in_model": 32,
+        "parameters": [
+          {
+            "name": "attention.wqkv",
+            "shape": [
+              8,
+              6,
+              128,
+              4096
+            ],
+            "owner": 2
+          },
+          {
+            "name": "attention.wo",
+            "shape": [
+              4096,
+              4096
+            ],
+            "owner": 3
+          },
+          {
+            "name": "feed_forward.w13",
+            "shape": [
+              2,
+              14336,
+              4096
+            ],
+            "owner": 0
+          },
+          {
+            "name": "feed_forward.w2",
+            "shape": [
+              4096,
+              14336
+            ],
+            "owner": 1
+          },
+          {
+            "name": "attention_norm",
+            "shape": [
+              4096
+            ],
+            "owner": 4
+          },
+          {
+            "name": "ffn_norm",
+            "shape": [
+              4096
+            ],
+            "owner": 5
+          }
+        ],
+        "bf16_mib_per_rank": [
+          224.0,
+          112.0,
+          48.0,
+          32.0,
+          0.0078125,
+          0.0078125,
+          0.0,
+          0.0
+        ],
+        "fp32_mib_per_rank": [
+          448.0,
+          224.0,
+          96.0,
+          64.0,
+          0.015625,
+          0.015625,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "embedding",
+        "counts": [
+          525336576,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "copies_in_model": 1,
+        "parameters": [
+          {
+            "name": "tok_embeddings",
+            "shape": [
+              128256,
+              4096
+            ],
+            "owner": 0
+          }
+        ],
+        "bf16_mib_per_rank": [
+          1002.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "fp32_mib_per_rank": [
+          2004.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "output_head",
+        "counts": [
+          525336576,
+          4096,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "copies_in_model": 1,
+        "parameters": [
+          {
+            "name": "norm",
+            "shape": [
+              4096
+            ],
+            "owner": 1
+          },
+          {
+            "name": "lm_head",
+            "shape": [
+              128256,
+              4096
+            ],
+            "owner": 0
+          }
+        ],
+        "bf16_mib_per_rank": [
+          1002.0,
+          0.0078125,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "fp32_mib_per_rank": [
+          2004.0,
+          0.015625,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "transformer_block_all_gather_bfloat16",
+      "op": "all_gather",
+      "dtype": "bfloat16",
+      "counts": [
+        117440512,
+        58720256,
+        25165824,
+        16777216,
+        4096,
+        4096,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "transformer_block_reduce_scatter_bfloat16",
+      "op": "reduce_scatter",
+      "dtype": "bfloat16",
+      "counts": [
+        117440512,
+        58720256,
+        25165824,
+        16777216,
+        4096,
+        4096,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "transformer_block_all_gather_float32",
+      "op": "all_gather",
+      "dtype": "float32",
+      "counts": [
+        117440512,
+        58720256,
+        25165824,
+        16777216,
+        4096,
+        4096,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "transformer_block_reduce_scatter_float32",
+      "op": "reduce_scatter",
+      "dtype": "float32",
+      "counts": [
+        117440512,
+        58720256,
+        25165824,
+        16777216,
+        4096,
+        4096,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "embedding_all_gather_bfloat16",
+      "op": "all_gather",
+      "dtype": "bfloat16",
+      "counts": [
+        525336576,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "embedding_reduce_scatter_bfloat16",
+      "op": "reduce_scatter",
+      "dtype": "bfloat16",
+      "counts": [
+        525336576,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "embedding_all_gather_float32",
+      "op": "all_gather",
+      "dtype": "float32",
+      "counts": [
+        525336576,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "embedding_reduce_scatter_float32",
+      "op": "reduce_scatter",
+      "dtype": "float32",
+      "counts": [
+        525336576,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "output_head_all_gather_bfloat16",
+      "op": "all_gather",
+      "dtype": "bfloat16",
+      "counts": [
+        525336576,
+        4096,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "output_head_reduce_scatter_bfloat16",
+      "op": "reduce_scatter",
+      "dtype": "bfloat16",
+      "counts": [
+        525336576,
+        4096,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "output_head_all_gather_float32",
+      "op": "all_gather",
+      "dtype": "float32",
+      "counts": [
+        525336576,
+        4096,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "output_head_reduce_scatter_float32",
+      "op": "reduce_scatter",
+      "dtype": "float32",
+      "counts": [
+        525336576,
+        4096,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

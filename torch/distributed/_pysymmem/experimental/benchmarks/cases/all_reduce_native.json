@@ -1,0 +1,104 @@
+{
+  "world_size": 8,
+  "baseline": {
+    "backend": "nccl",
+    "all_reduce_accumulation": "native"
+  },
+  "candidate": {
+    "backend": "symmem_fp32_accum",
+    "imports": [
+      "torch.distributed._pysymmem.experimental"
+    ],
+    "env": {
+      "SYMMEM_WORKSPACE_BYTES": "268435456"
+    }
+  },
+  "timing": {
+    "warmup": 5,
+    "iterations": 10,
+    "trials": 7,
+    "validation_steps": 4,
+    "timeout_seconds": 90,
+    "modes": [
+      "eager",
+      "graph"
+    ]
+  },
+  "cases": [
+    {
+      "name": "bf16_2048",
+      "op": "all_reduce",
+      "dtype": "bfloat16",
+      "counts": [
+        2048,
+        2048,
+        2048,
+        2048,
+        2048,
+        2048,
+        2048,
+        2048
+      ]
+    },
+    {
+      "name": "bf16_32769",
+      "op": "all_reduce",
+      "dtype": "bfloat16",
+      "counts": [
+        32769,
+        32769,
+        32769,
+        32769,
+        32769,
+        32769,
+        32769,
+        32769
+      ]
+    },
+    {
+      "name": "bf16_524288",
+      "op": "all_reduce",
+      "dtype": "bfloat16",
+      "counts": [
+        524288,
+        524288,
+        524288,
+        524288,
+        524288,
+        524288,
+        524288,
+        524288
+      ]
+    },
+    {
+      "name": "bf16_8388608",
+      "op": "all_reduce",
+      "dtype": "bfloat16",
+      "counts": [
+        8388608,
+        8388608,
+        8388608,
+        8388608,
+        8388608,
+        8388608,
+        8388608,
+        8388608
+      ]
+    },
+    {
+      "name": "bf16_67108864",
+      "op": "all_reduce",
+      "dtype": "bfloat16",
+      "counts": [
+        67108864,
+        67108864,
+        67108864,
+        67108864,
+        67108864,
+        67108864,
+        67108864,
+        67108864
+      ]
+    }
+  ]
+}
